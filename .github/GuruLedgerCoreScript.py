@@ -12,6 +12,10 @@ from sqlalchemy import create_engine
 SEC_CIK_TICKER_URL = "https://www.sec.gov/files/company_tickers.json"
 MARKETCAP_URL = "https://companiesmarketcap.com/?download=csv"
 
+# ✨ 1. UPDATE THIS LINE: Change the User-Agent to be unique to you.
+# This is required by the SEC to prevent your automated requests from being blocked.
+HEADERS = {"GuruLedger": "GuruLedger"}
+
 FACTS_TO_FETCH = [
     # Balance Sheet
     {"column_name": "Assets_LastQuarter-2", "tag": "Assets", "unit": "USD", "timeframe_offset": -2, "type": "balance_sheet"},
@@ -48,13 +52,10 @@ FACTS_TO_FETCH = [
     {"column_name": "EBIT_LastQuarter", "tag": "OperatingIncomeLoss", "unit": "USD", "timeframe_offset": 0, "type": "income_statement"},
 ]
 
-HEADERS = {"User-Agent": "GitHub Actions Screener YourName@example.com"}
-
 def add_calculated_columns(df):
     """Adds consolidated and ratio columns to the DataFrame."""
     print("➡️ Calculating final columns and financial ratios...")
 
-    # --- Part 1: Consolidate to latest available data ---
     df['Assets'] = df['Assets_LastQuarter'].combine_first(df['Assets_LastQuarter-1']).combine_first(df['Assets_LastQuarter-2'])
     df['CurrentAssets'] = df['CurrentAssets_LastQuarter'].combine_first(df['CurrentAssets_LastQuarter-1']).combine_first(df['CurrentAssets_LastQuarter-2'])
     df['CurrentLiabilities'] = df['CurrentLiabilities_LastQuarter'].combine_first(df['CurrentLiabilities_LastQuarter-1']).combine_first(df['CurrentLiabilities_LastQuarter-2'])
@@ -62,20 +63,14 @@ def add_calculated_columns(df):
     df['Liabilities'] = df['Liabilities_LastQuarter'].combine_first(df['Liabilities_LastQuarter-1']).combine_first(df['Liabilities_LastQuarter-2'])
     df['NetIncome'] = df['NetIncome_LastQuarter'].combine_first(df['NetIncome_LastQuarter-1']).combine_first(df['NetIncome_LastQuarter-2'])
     df['StockholdersEquity'] = df['StockholdersEquity_LastQuarter'].combine_first(df['StockholdersEquity_LastQuarter-1']).combine_first(df['StockholdersEquity_LastQuarter-2'])
-
-    # Redefine Net Fixed Assets as Total Assets - Current Assets for a more accurate value.
     df['NetFixedAssets'] = df['Assets'] - df['CurrentAssets']
     
-    # --- Complex TTM EBIT Calculation ---
     ttm_with_lq = ['EBIT_LastQuarter', 'EBIT_LastQuarter-1', 'EBIT_LastQuarter-2', 'EBIT_LastQuarter-3']
     ttm_no_lq = ['EBIT_LastQuarter-1', 'EBIT_LastQuarter-2', 'EBIT_LastQuarter-3', 'EBIT_LastQuarter-4']
-    
     sum_with_lq = df[ttm_with_lq].sum(axis=1)
     sum_no_lq = df[ttm_no_lq].sum(axis=1)
-    
     df['EBIT'] = np.where(df['EBIT_LastQuarter'].notna(), sum_with_lq, sum_no_lq)
 
-    # --- Part 2: Calculate Financial Ratios ---
     df['Capital'] = df['NetFixedAssets'] + df['CurrentAssets'] - df['CurrentLiabilities']
     df['EarningsYield'] = df['EBIT'].div(df['Market Cap'])
     df['ROC'] = df['EBIT'].div(df['Capital'])
@@ -89,7 +84,6 @@ def get_dynamic_timeframes():
     today = date.today()
     last_quarter_year = 2025
     last_quarter_num = 2
-
     timeframes = {}
     for i in range(6):
         q_num, q_year = last_quarter_num - i, last_quarter_year
@@ -123,7 +117,17 @@ def fetch_sec_data():
     """Main function to fetch all data and merge it into a single DataFrame."""
     print("➡️ Fetching company CIK, Ticker, and Name list from SEC...")
     response = requests.get(SEC_CIK_TICKER_URL, headers=HEADERS)
-    df = pd.DataFrame.from_dict(response.json(), orient='index')
+    
+    # ✨ 2. ADDED ERROR HANDLING: Check the server response before processing
+    if response.status_code != 200:
+        # This will print the error page content sent by the SEC server, helping you debug
+        print(f"❌ ERROR: Failed to fetch company list. Status Code: {response.status_code}")
+        print("Response Text:", response.text)
+        # Stop the script if this critical data can't be fetched
+        raise Exception("Could not fetch company ticker data from SEC.")
+        
+    company_data = response.json()
+    df = pd.DataFrame.from_dict(company_data, orient='index')
     df['cik'] = df['cik_str'].astype(int)
     df = df[['cik', 'ticker', 'title']].rename(columns={'ticker': 'Ticker', 'title': 'CompanyName'})
 
@@ -233,7 +237,6 @@ def run_guru_models(df, db_engine):
     mf_sells.to_sql('magic_formula_sells', con=db_engine, if_exists='replace', index=False)
     print("   - ✅ Updated Magic Formula tables in the database.")
 
-
     # --- 2. The Intelligent Investor (Benjamin Graham) ---
     print("\n🧐 Running Model 2: The Intelligent Investor...")
     ii_df = df.copy()
@@ -246,7 +249,6 @@ def run_guru_models(df, db_engine):
     print(f"   - Found {len(ii_buys)} Buy recommendations.")
     ii_buys.to_sql('intelligent_investor_buys', con=db_engine, if_exists='replace', index=False)
     print("   - ✅ Updated Intelligent Investor table in the database.")
-
 
     # --- 3. Combined Model (Magic Formula on Graham's list) ---
     print("\n✨ Running Model 3: Combined Magic Formula & Intelligent Investor...")
@@ -271,22 +273,16 @@ def run_guru_models(df, db_engine):
 
 
 if __name__ == "__main__":
-    # Get the database URL from the secret environment variable provided by GitHub Actions
     DATABASE_URL = os.environ.get('DATABASE_URL')
     if not DATABASE_URL:
         raise ValueError("No DATABASE_URL secret found. Please set it in your GitHub repository settings.")
     
-    # Create the database engine
     engine = create_engine(DATABASE_URL)
-
-    # Run the main data fetching and processing function
     final_df = fetch_sec_data()
     
     if final_df is not None:
-        # Save the full detailed table to the database
         print("\n➡️ Writing full dataset to the database...")
         final_df.to_sql('sec_financial_data_full_detail', con=engine, if_exists='replace', index=False)
         print("✅ Full dataset table updated in the database.")
 
-        # Run the final analysis models and pass the database engine to it
         run_guru_models(final_df, engine)
