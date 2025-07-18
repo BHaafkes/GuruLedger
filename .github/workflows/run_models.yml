@@ -28,4 +28,4 @@ jobs:
         env:
           # This securely uses the secret you created
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: python GuruLedgerCoreScript.py # IMPORTANT: Change this to your script's filename
+        run: python .github/GuruLedgerCoreScript.py # IMPORTANT: Change this to your script's filename
