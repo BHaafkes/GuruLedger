@@ -15,24 +15,19 @@ from firebase_admin import credentials, firestore
 # --- Flask App & Firebase Initialisatie ---
 app = Flask(__name__)
 
-# Initialiseer Firebase Admin SDK op globaal niveau
+# Initialiseer de Firebase app. De 'db' client wordt later per request aangemaakt.
 try:
     creds_json_string = os.environ.get('FIRESTORE_CREDENTIALS')
     if not creds_json_string:
-        raise ValueError("Geen FIRESTORE_CREDENTIALS secret gevonden in de omgeving.")
-    
-    creds_dict = json.loads(creds_json_string)
-    cred = credentials.Certificate(creds_dict)
-    
-    if not firebase_admin._apps:
-        firebase_admin.initialize_app(cred)
-    
-    db = firestore.client()
-    print("✅ Firebase Admin SDK succesvol geïnitialiseerd.")
-
+        print("❌ FOUT: Geen FIRESTORE_CREDENTIALS secret gevonden in de omgeving.")
+    else:
+        creds_dict = json.loads(creds_json_string)
+        cred = credentials.Certificate(creds_dict)
+        if not firebase_admin._apps:
+            firebase_admin.initialize_app(cred)
+        print("✅ Firebase App succesvol geïnitialiseerd.")
 except Exception as e:
-    print(f"❌ FOUT: Kan Firebase Admin SDK niet initialiseren: {e}")
-    db = None
+    print(f"❌ FOUT: Kan Firebase App niet initialiseren: {e}")
 
 # --- Configuratie ---
 SEC_CIK_TICKER_URL = "https://www.sec.gov/files/company_tickers.json"
@@ -78,8 +73,7 @@ def write_df_to_firestore(db_client, df, collection_name):
     """Verwijdert een collectie en schrijft een DataFrame weg naar Firestore."""
     collection_ref = db_client.collection(collection_name)
     
-    # Bestaande documenten verwijderen (in batches voor efficiëntie)
-    docs = collection_ref.limit(500).stream()
+    docs = collection_ref.stream()
     deleted = 0
     for doc in docs:
         doc.reference.delete()
@@ -88,7 +82,6 @@ def write_df_to_firestore(db_client, df, collection_name):
     if deleted > 0:
         print(f"   - Oude documenten in '{collection_name}' verwijderd.")
 
-    # DataFrame naar Firestore schrijven
     df_cleaned = df.replace({np.nan: None})
     
     for index, row in df_cleaned.iterrows():
@@ -289,8 +282,20 @@ def main_job_entrypoint():
     """Hoofdfunctie die wordt aangeroepen door Cloud Scheduler."""
     global db
     if db is None:
-        return "Fout: Firestore database is niet geïnitialiseerd.", 500
-
+        # Probeer opnieuw te initialiseren als het mislukt is bij het opstarten
+        try:
+            print("Poging tot her-initialisatie van Firebase Admin SDK...")
+            creds_json_string = os.environ.get('FIRESTORE_CREDENTIALS')
+            creds_dict = json.loads(creds_json_string)
+            cred = credentials.Certificate(creds_dict)
+            if not firebase_admin._apps:
+                firebase_admin.initialize_app(cred)
+            db = firestore.client()
+            print("✅ Her-initialisatie succesvol.")
+        except Exception as e:
+            print(f"❌ FOUT bij her-initialisatie: {e}")
+            return f"Fout: Firestore database is niet geïnitialiseerd: {e}", 500
+    
     try:
         final_df = fetch_sec_data()
         
@@ -311,3 +316,4 @@ def main_job_entrypoint():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
+
