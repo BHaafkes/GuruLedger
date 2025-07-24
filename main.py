@@ -12,8 +12,27 @@ from flask import Flask
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# --- Flask App Initialisatie ---
+# --- Flask App & Firebase Initialisatie ---
 app = Flask(__name__)
+
+# Initialiseer Firebase Admin SDK op globaal niveau
+try:
+    creds_json_string = os.environ.get('FIRESTORE_CREDENTIALS')
+    if not creds_json_string:
+        raise ValueError("Geen FIRESTORE_CREDENTIALS secret gevonden in de omgeving.")
+    
+    creds_dict = json.loads(creds_json_string)
+    cred = credentials.Certificate(creds_dict)
+    
+    if not firebase_admin._apps:
+        firebase_admin.initialize_app(cred)
+    
+    db = firestore.client()
+    print("✅ Firebase Admin SDK succesvol geïnitialiseerd.")
+
+except Exception as e:
+    print(f"❌ FOUT: Kan Firebase Admin SDK niet initialiseren: {e}")
+    db = None
 
 # --- Configuratie ---
 SEC_CIK_TICKER_URL = "https://www.sec.gov/files/company_tickers.json"
@@ -55,30 +74,31 @@ FACTS_TO_FETCH = [
 ]
 
 # --- Firestore Helper Functie ---
-def write_df_to_firestore(db, df, collection_name):
+def write_df_to_firestore(db_client, df, collection_name):
     """Verwijdert een collectie en schrijft een DataFrame weg naar Firestore."""
-    collection_ref = db.collection(collection_name)
+    collection_ref = db_client.collection(collection_name)
     
-    # Bestaande documenten verwijderen
-    docs = collection_ref.stream()
+    # Bestaande documenten verwijderen (in batches voor efficiëntie)
+    docs = collection_ref.limit(500).stream()
+    deleted = 0
     for doc in docs:
         doc.reference.delete()
-    print(f"   - Oude documenten in '{collection_name}' verwijderd.")
+        deleted += 1
+    
+    if deleted > 0:
+        print(f"   - Oude documenten in '{collection_name}' verwijderd.")
 
     # DataFrame naar Firestore schrijven
-    # NaN-waarden vervangen om Firestore-fouten te voorkomen
     df_cleaned = df.replace({np.nan: None})
     
     for index, row in df_cleaned.iterrows():
         doc_data = row.to_dict()
-        # Gebruik Ticker als document ID voor eenvoudige opzoekingen
         doc_id = str(row.get('Ticker', index))
         collection_ref.document(doc_id).set(doc_data)
         
     print(f"   - ✅ {len(df)} documenten weggeschreven naar '{collection_name}'.")
 
 # --- Bestaande Functies (add_calculated_columns, etc.) ---
-# Deze functies blijven grotendeels hetzelfde.
 def add_calculated_columns(df):
     print("➡️ Calculating final columns and financial ratios...")
     df['Assets'] = df['Assets_LastQuarter'].combine_first(df['Assets_LastQuarter-1']).combine_first(df['Assets_LastQuarter-2'])
@@ -216,7 +236,7 @@ def fetch_sec_data():
     df = df[final_order_existing]
     return df
 
-def run_guru_models(df, db):
+def run_guru_models(db_client, df):
     """Voert de guru-modellen uit en schrijft de resultaten naar Firestore."""
     print("\n---  Guru Model Analysis ---")
     
@@ -233,8 +253,8 @@ def run_guru_models(df, db):
     mf_buys = mf_df.head(30)
     mf_sells = mf_df.tail(30)
     print(f"   - Found {len(mf_buys)} Buy and {len(mf_sells)} Sell picks.")
-    write_df_to_firestore(db, mf_buys, 'magic_formula_buys')
-    write_df_to_firestore(db, mf_sells, 'magic_formula_sells')
+    write_df_to_firestore(db_client, mf_buys, 'magic_formula_buys')
+    write_df_to_firestore(db_client, mf_sells, 'magic_formula_sells')
     
     # --- 2. The Intelligent Investor ---
     print("\n🧐 Running Model 2: The Intelligent Investor...")
@@ -244,7 +264,7 @@ def run_guru_models(df, db):
     ii_df.dropna(subset=['BargainValue'], inplace=True)
     ii_buys = ii_df[ii_df['BargainValue'] > 0]
     print(f"   - Found {len(ii_buys)} Buy picks.")
-    write_df_to_firestore(db, ii_buys, 'intelligent_investor_buys')
+    write_df_to_firestore(db_client, ii_buys, 'intelligent_investor_buys')
 
     # --- 3. Combined Model ---
     print("\n✨ Running Model 3: Combined Magic Formula & Intelligent Investor...")
@@ -260,30 +280,24 @@ def run_guru_models(df, db):
         combo_df.sort_values('Magic_Rank', inplace=True)
         combo_buys = combo_df.head(30)
         print(f"   - Found {len(combo_buys)} Buy picks.")
-        write_df_to_firestore(db, combo_buys, 'combined_model_buys')
+        write_df_to_firestore(db_client, combo_buys, 'combined_model_buys')
     else:
         print("   - No companies met the initial criteria for the Combined Model.")
 
 @app.route('/')
 def main_job_entrypoint():
     """Hoofdfunctie die wordt aangeroepen door Cloud Scheduler."""
+    global db
+    if db is None:
+        return "Fout: Firestore database is niet geïnitialiseerd.", 500
+
     try:
-        # Initialiseer Firebase Admin SDK
-        if not firebase_admin._apps:
-            creds_json_string = os.environ.get('FIRESTORE_CREDENTIALS')
-            if not creds_json_string:
-                raise ValueError("Geen FIRESTORE_CREDENTIALS secret gevonden.")
-            creds_dict = json.loads(creds_json_string)
-            cred = credentials.Certificate(creds_dict)
-            firebase_admin.initialize_app(cred)
-        
-        db = firestore.client()
         final_df = fetch_sec_data()
         
         if final_df is not None:
             print("\n➡️ Volledige dataset naar Firestore schrijven...")
             write_df_to_firestore(db, final_df, 'sec_financial_data_full_detail')
-            run_guru_models(final_df, db)
+            run_guru_models(db, final_df)
         
         return "Script succesvol voltooid.", 200
         
