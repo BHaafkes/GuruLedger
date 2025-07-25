@@ -15,6 +15,21 @@ from firebase_admin import credentials, firestore
 # --- Flask App Initialisatie ---
 app = Flask(__name__)
 
+# --- Robuuste Firestore Initialisatie ---
+# Initialiseer de Firebase-app direct wanneer de module wordt geladen.
+try:
+    if not firebase_admin._apps:
+        print("Firebase App niet gevonden, initialiseren...")
+        creds_json_string = os.environ.get('FIRESTORE_CREDENTIALS')
+        if not creds_json_string:
+            raise ValueError("Geen FIRESTORE_CREDENTIALS secret gevonden in de omgeving.")
+        creds_dict = json.loads(creds_json_string)
+        cred = credentials.Certificate(creds_dict)
+        firebase_admin.initialize_app(cred)
+        print("✅ Firebase App succesvol geïnitialiseerd.")
+except Exception as e:
+    print(f"❌ Fout tijdens initialisatie van Firebase: {e}")
+
 # --- Configuratie ---
 SEC_CIK_TICKER_URL = "https://www.sec.gov/files/company_tickers.json"
 MARKETCAP_URL = "https://companiesmarketcap.com/?download=csv"
@@ -267,18 +282,7 @@ def run_guru_models(db_client, df):
 def main_job_entrypoint():
     """Hoofdfunctie die wordt aangeroepen door Cloud Scheduler."""
     try:
-        # Initialiseer de Firebase-app binnen de request-context
-        if not firebase_admin._apps:
-            print("Firebase App niet gevonden, initialiseren...")
-            creds_json_string = os.environ.get('FIRESTORE_CREDENTIALS')
-            if not creds_json_string:
-                raise ValueError("Geen FIRESTORE_CREDENTIALS secret gevonden.")
-            creds_dict = json.loads(creds_json_string)
-            cred = credentials.Certificate(creds_dict)
-            firebase_admin.initialize_app(cred)
-            print("✅ Firebase App succesvol geïnitialiseerd.")
-        
-        db = firestore.client() 
+        db = firestore.client() # Haal de client op van de geïnitialiseerde app
         final_df = fetch_sec_data()
         
         if final_df is not None:
