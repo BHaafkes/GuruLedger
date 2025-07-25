@@ -12,22 +12,8 @@ from flask import Flask
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# --- Flask App & Firebase Initialisatie ---
+# --- Flask App Initialisatie ---
 app = Flask(__name__)
-
-# Initialiseer de Firebase app. De 'db' client wordt later per request aangemaakt.
-try:
-    creds_json_string = os.environ.get('FIRESTORE_CREDENTIALS')
-    if not creds_json_string:
-        print("❌ FOUT: Geen FIRESTORE_CREDENTIALS secret gevonden in de omgeving.")
-    else:
-        creds_dict = json.loads(creds_json_string)
-        cred = credentials.Certificate(creds_dict)
-        if not firebase_admin._apps:
-            firebase_admin.initialize_app(cred)
-        print("✅ Firebase App succesvol geïnitialiseerd.")
-except Exception as e:
-    print(f"❌ FOUT: Kan Firebase App niet initialiseren: {e}")
 
 # --- Configuratie ---
 SEC_CIK_TICKER_URL = "https://www.sec.gov/files/company_tickers.json"
@@ -73,15 +59,17 @@ def write_df_to_firestore(db_client, df, collection_name):
     """Verwijdert een collectie en schrijft een DataFrame weg naar Firestore."""
     collection_ref = db_client.collection(collection_name)
     
+    # Bestaande documenten verwijderen (in batches voor efficiëntie)
     docs = collection_ref.stream()
-    deleted = 0
+    deleted_count = 0
     for doc in docs:
         doc.reference.delete()
-        deleted += 1
+        deleted_count += 1
     
-    if deleted > 0:
+    if deleted_count > 0:
         print(f"   - Oude documenten in '{collection_name}' verwijderd.")
 
+    # DataFrame naar Firestore schrijven
     df_cleaned = df.replace({np.nan: None})
     
     for index, row in df_cleaned.iterrows():
@@ -280,22 +268,10 @@ def run_guru_models(db_client, df):
 @app.route('/')
 def main_job_entrypoint():
     """Hoofdfunctie die wordt aangeroepen door Cloud Scheduler."""
-    global db
-    if db is None:
-        # Probeer opnieuw te initialiseren als het mislukt is bij het opstarten
-        try:
-            print("Poging tot her-initialisatie van Firebase Admin SDK...")
-            creds_json_string = os.environ.get('FIRESTORE_CREDENTIALS')
-            creds_dict = json.loads(creds_json_string)
-            cred = credentials.Certificate(creds_dict)
-            if not firebase_admin._apps:
-                firebase_admin.initialize_app(cred)
-            db = firestore.client()
-            print("✅ Her-initialisatie succesvol.")
-        except Exception as e:
-            print(f"❌ FOUT bij her-initialisatie: {e}")
-            return f"Fout: Firestore database is niet geïnitialiseerd: {e}", 500
-    
+    db = firestore.client() # Haal de client op van de geïnitialiseerde app
+    if not db:
+        return "Fout: Firestore database client kon niet worden aangemaakt.", 500
+
     try:
         final_df = fetch_sec_data()
         
@@ -316,4 +292,3 @@ def main_job_entrypoint():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
-
