@@ -59,7 +59,6 @@ def write_df_to_firestore(db_client, df, collection_name):
     """Verwijdert een collectie en schrijft een DataFrame weg naar Firestore."""
     collection_ref = db_client.collection(collection_name)
     
-    # Bestaande documenten verwijderen (in batches voor efficiëntie)
     docs = collection_ref.stream()
     deleted_count = 0
     for doc in docs:
@@ -69,7 +68,6 @@ def write_df_to_firestore(db_client, df, collection_name):
     if deleted_count > 0:
         print(f"   - Oude documenten in '{collection_name}' verwijderd.")
 
-    # DataFrame naar Firestore schrijven
     df_cleaned = df.replace({np.nan: None})
     
     for index, row in df_cleaned.iterrows():
@@ -268,11 +266,9 @@ def run_guru_models(db_client, df):
 @app.route('/')
 def main_job_entrypoint():
     """Hoofdfunctie die wordt aangeroepen door Cloud Scheduler."""
-    db = firestore.client() # Haal de client op van de geïnitialiseerde app
-    if not db:
-        return "Fout: Firestore database client kon niet worden aangemaakt.", 500
-
     try:
+        # Haal de client op van de reeds geïnitialiseerde app
+        db = firestore.client() 
         final_df = fetch_sec_data()
         
         if final_df is not None:
