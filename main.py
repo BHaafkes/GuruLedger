@@ -12,24 +12,19 @@ from flask import Flask
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# --- Flask App Initialisatie ---
+# --- Flask App Initialisatie & Robuuste Firestore Initialisatie ---
 app = Flask(__name__)
-
-# --- Robuuste Firestore Initialisatie ---
-# Deze code wordt één keer uitgevoerd wanneer de Cloud Run container opstart.
 try:
     if not firebase_admin._apps:
         print("➡️ Initialiseren van Firebase App...")
         creds_json_string = os.environ.get('FIRESTORE_CREDENTIALS')
         if not creds_json_string:
-            raise ValueError("FIRESTORE_CREDENTIALS secret niet gevonden. Controleer de Cloud Run variabelen.")
-        
+            raise ValueError("FIRESTORE_CREDENTIALS secret niet gevonden.")
         creds_dict = json.loads(creds_json_string)
         cred = credentials.Certificate(creds_dict)
         firebase_admin.initialize_app(cred)
         print("✅ Firebase App succesvol geïnitialiseerd.")
 except Exception as e:
-    # Als de initialisatie faalt, log de fout duidelijk.
     print(f"❌ ERNSTIGE FOUT tijdens initialisatie van Firebase: {e}")
 
 # --- Configuratie ---
@@ -38,7 +33,7 @@ MARKETCAP_URL = "https://companiesmarketcap.com/?download=csv"
 HEADERS = {"User-Agent": "GuruLedger Automated Screener youremail@example.com"}
 
 FACTS_TO_FETCH = [
-    # (De lijst met FACTS_TO_FETCH blijft ongewijzigd)
+    # (Lijst blijft ongewijzigd)
     {"column_name": "Assets_LastQuarter-2", "tag": "Assets", "unit": "USD", "timeframe_offset": -2, "type": "balance_sheet"},
     {"column_name": "Assets_LastQuarter-1", "tag": "Assets", "unit": "USD", "timeframe_offset": -1, "type": "balance_sheet"},
     {"column_name": "Assets_LastQuarter", "tag": "Assets", "unit": "USD", "timeframe_offset": 0, "type": "balance_sheet"},
@@ -71,31 +66,47 @@ FACTS_TO_FETCH = [
     {"column_name": "EBIT_LastQuarter", "tag": "OperatingIncomeLoss", "unit": "USD", "timeframe_offset": 0, "type": "income_statement"},
 ]
 
-# --- Firestore Helper Functie ---
+# --- **NIEUWE, EFFICIËNTE** Firestore Helper Functie ---
 def write_df_to_firestore(db_client, df, collection_name):
+    """Verwijdert een collectie en schrijft een DataFrame weg naar Firestore met Batched Writes."""
     collection_ref = db_client.collection(collection_name)
     
-    docs = collection_ref.stream()
-    deleted_count = 0
-    batch = db_client.batch()
+    # 1. Efficiënt verwijderen in batches
+    docs = collection_ref.limit(500).stream()
+    deleted = 0
     for doc in docs:
-        batch.delete(doc.reference)
-        deleted_count += 1
-    batch.commit()
+        batch = db_client.batch()
+        while True:
+            doc_list = list(docs)
+            if not doc_list:
+                break
+            for doc in doc_list:
+                batch.delete(doc.reference)
+                deleted += 1
+            batch.commit()
+            docs = collection_ref.limit(500).stream() # Haal de volgende batch op
     
-    if deleted_count > 0:
-        print(f"   - Oude documenten in '{collection_name}' verwijderd.")
+    if deleted > 0:
+        print(f"   - {deleted} oude documenten in '{collection_name}' verwijderd.")
 
+    # 2. Efficiënt schrijven in batches
     df_cleaned = df.replace({np.nan: None})
-    
+    batch = db_client.batch()
     for index, row in df_cleaned.iterrows():
         doc_data = row.to_dict()
         doc_id = str(row.get('Ticker', index))
-        collection_ref.document(doc_id).set(doc_data)
+        doc_ref = collection_ref.document(doc_id)
+        batch.set(doc_ref, doc_data)
+        # Commit de batch elke 500 documenten
+        if (index + 1) % 500 == 0:
+            batch.commit()
+            batch = db_client.batch() # Start een nieuwe batch
+    
+    batch.commit() # Commit de laatste batch
         
     print(f"   - ✅ {len(df)} documenten weggeschreven naar '{collection_name}'.")
 
-# --- Bestaande Functies (add_calculated_columns, etc.) ---
+# --- Bestaande Functies (add_calculated_columns, etc.) blijven ongewijzigd ---
 def add_calculated_columns(df):
     print("➡️ Calculating final columns and financial ratios...")
     df['Assets'] = df['Assets_LastQuarter'].combine_first(df['Assets_LastQuarter-1']).combine_first(df['Assets_LastQuarter-2'])
@@ -285,7 +296,6 @@ def run_guru_models(db_client, df):
 def main_job_entrypoint():
     """Hoofdfunctie die wordt aangeroepen door Cloud Scheduler."""
     try:
-        # De 'db' client wordt nu direct verkregen van de geïnitialiseerde app
         db = firestore.client() 
         final_df = fetch_sec_data()
         
