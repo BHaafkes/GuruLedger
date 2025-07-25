@@ -267,7 +267,17 @@ def run_guru_models(db_client, df):
 def main_job_entrypoint():
     """Hoofdfunctie die wordt aangeroepen door Cloud Scheduler."""
     try:
-        # Haal de client op van de reeds geïnitialiseerde app
+        # Initialiseer de Firebase-app binnen de request-context
+        if not firebase_admin._apps:
+            print("Firebase App niet gevonden, initialiseren...")
+            creds_json_string = os.environ.get('FIRESTORE_CREDENTIALS')
+            if not creds_json_string:
+                raise ValueError("Geen FIRESTORE_CREDENTIALS secret gevonden.")
+            creds_dict = json.loads(creds_json_string)
+            cred = credentials.Certificate(creds_dict)
+            firebase_admin.initialize_app(cred)
+            print("✅ Firebase App succesvol geïnitialiseerd.")
+        
         db = firestore.client() 
         final_df = fetch_sec_data()
         
