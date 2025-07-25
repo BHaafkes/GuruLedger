@@ -15,6 +15,28 @@ from firebase_admin import credentials, firestore
 # --- Flask App Initialisatie ---
 app = Flask(__name__)
 
+# --- Robuuste Firestore Initialisatie ---
+# Deze code wordt één keer uitgevoerd wanneer de Cloud Run container opstart.
+try:
+    if not firebase_admin._apps:
+        print("➡️ Initialiseren van Firebase App...")
+        creds_json_string = os.environ.get('FIRESTORE_CREDENTIALS')
+        if not creds_json_string:
+            raise ValueError("FIRESTORE_CREDENTIALS secret niet gevonden. Controleer de Cloud Run variabelen.")
+        
+        creds_dict = json.loads(creds_json_string)
+        cred = credentials.Certificate(creds_dict)
+        firebase_admin.initialize_app(cred)
+        print("✅ Firebase App succesvol geïnitialiseerd.")
+except Exception as e:
+    # Als de initialisatie faalt, log de fout duidelijk.
+    print(f"❌ ERNSTIGE FOUT tijdens initialisatie van Firebase: {e}")
+    # We kunnen hier een global flag zetten of de app laten crashen zodat de logs duidelijk zijn.
+    firebase_app_initialized = False
+else:
+    firebase_app_initialized = True
+
+
 # --- Configuratie ---
 SEC_CIK_TICKER_URL = "https://www.sec.gov/files/company_tickers.json"
 MARKETCAP_URL = "https://companiesmarketcap.com/?download=csv"
@@ -56,14 +78,15 @@ FACTS_TO_FETCH = [
 
 # --- Firestore Helper Functie ---
 def write_df_to_firestore(db_client, df, collection_name):
-    """Verwijdert een collectie en schrijft een DataFrame weg naar Firestore."""
     collection_ref = db_client.collection(collection_name)
     
     docs = collection_ref.stream()
     deleted_count = 0
+    batch = db_client.batch()
     for doc in docs:
-        doc.reference.delete()
+        batch.delete(doc.reference)
         deleted_count += 1
+    batch.commit()
     
     if deleted_count > 0:
         print(f"   - Oude documenten in '{collection_name}' verwijderd.")
@@ -267,7 +290,9 @@ def run_guru_models(db_client, df):
 def main_job_entrypoint():
     """Hoofdfunctie die wordt aangeroepen door Cloud Scheduler."""
     try:
-        # Haal de client op van de reeds geïnitialiseerde app
+        if not firebase_app_initialized:
+            raise Exception("Firebase App is niet geïnitialiseerd. Controleer de opstartlogs.")
+        
         db = firestore.client() 
         final_df = fetch_sec_data()
         
