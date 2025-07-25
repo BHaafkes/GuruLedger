@@ -31,11 +31,6 @@ try:
 except Exception as e:
     # Als de initialisatie faalt, log de fout duidelijk.
     print(f"❌ ERNSTIGE FOUT tijdens initialisatie van Firebase: {e}")
-    # We kunnen hier een global flag zetten of de app laten crashen zodat de logs duidelijk zijn.
-    firebase_app_initialized = False
-else:
-    firebase_app_initialized = True
-
 
 # --- Configuratie ---
 SEC_CIK_TICKER_URL = "https://www.sec.gov/files/company_tickers.json"
@@ -290,9 +285,7 @@ def run_guru_models(db_client, df):
 def main_job_entrypoint():
     """Hoofdfunctie die wordt aangeroepen door Cloud Scheduler."""
     try:
-        if not firebase_app_initialized:
-            raise Exception("Firebase App is niet geïnitialiseerd. Controleer de opstartlogs.")
-        
+        # De 'db' client wordt nu direct verkregen van de geïnitialiseerde app
         db = firestore.client() 
         final_df = fetch_sec_data()
         
