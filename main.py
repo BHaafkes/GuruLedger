@@ -99,7 +99,7 @@ def write_df_to_firestore(db_client, df, collection_name):
         
     print(f"   - ✅ {len(df)} documenten weggeschreven naar '{collection_name}'.")
 
-# --- Bestaande Functies ---
+# --- Bestaande Functies (add_calculated_columns, etc.) ---
 def add_calculated_columns(df):
     print("➡️ Calculating final columns and financial ratios...")
     df['Assets'] = df['Assets_LastQuarter'].combine_first(df['Assets_LastQuarter-1']).combine_first(df['Assets_LastQuarter-2'])
@@ -299,11 +299,10 @@ def main_job_entrypoint():
         final_df = fetch_sec_data()
         
         if final_df is not None:
-            print("\n➡️ DataFrame memory usage before running models:")
-            final_df.info(memory_usage='deep')
-
-            print("\n➡️ Volledige dataset naar Firestore schrijven...")
-            write_df_to_firestore(db, final_df, 'sec_financial_data_full_detail')
+            # Verwijder het wegschrijven van de volledige dataset
+            # print("\n➡️ Volledige dataset naar Firestore schrijven...")
+            # write_df_to_firestore(db, final_df, 'sec_financial_data_full_detail')
+            
             run_guru_models(db, final_df)
         
         return "Script succesvol voltooid.", 200
