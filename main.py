@@ -299,10 +299,6 @@ def main_job_entrypoint():
         final_df = fetch_sec_data()
         
         if final_df is not None:
-            # Verwijder het wegschrijven van de volledige dataset
-            # print("\n➡️ Volledige dataset naar Firestore schrijven...")
-            # write_df_to_firestore(db, final_df, 'sec_financial_data_full_detail')
-            
             run_guru_models(db, final_df)
         
         return "Script succesvol voltooid.", 200
