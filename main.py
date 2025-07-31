@@ -7,6 +7,7 @@ import time
 import os
 import json
 from flask import Flask
+import gc # Import garbage collector
 
 # Firebase Admin SDK voor Firestore
 import firebase_admin
@@ -66,47 +67,39 @@ FACTS_TO_FETCH = [
     {"column_name": "EBIT_LastQuarter", "tag": "OperatingIncomeLoss", "unit": "USD", "timeframe_offset": 0, "type": "income_statement"},
 ]
 
-# --- **NIEUWE, EFFICIËNTE** Firestore Helper Functie ---
+# --- Firestore Helper Functie ---
 def write_df_to_firestore(db_client, df, collection_name):
     """Verwijdert een collectie en schrijft een DataFrame weg naar Firestore met Batched Writes."""
     collection_ref = db_client.collection(collection_name)
     
-    # 1. Efficiënt verwijderen in batches
-    docs = collection_ref.limit(500).stream()
-    deleted = 0
+    docs = collection_ref.stream()
+    deleted_count = 0
+    batch = db_client.batch()
     for doc in docs:
-        batch = db_client.batch()
-        while True:
-            doc_list = list(docs)
-            if not doc_list:
-                break
-            for doc in doc_list:
-                batch.delete(doc.reference)
-                deleted += 1
-            batch.commit()
-            docs = collection_ref.limit(500).stream() # Haal de volgende batch op
+        batch.delete(doc.reference)
+        deleted_count += 1
+    batch.commit()
     
-    if deleted > 0:
-        print(f"   - {deleted} oude documenten in '{collection_name}' verwijderd.")
+    if deleted_count > 0:
+        print(f"   - Oude documenten in '{collection_name}' verwijderd.")
 
-    # 2. Efficiënt schrijven in batches
     df_cleaned = df.replace({np.nan: None})
+    
     batch = db_client.batch()
     for index, row in df_cleaned.iterrows():
         doc_data = row.to_dict()
         doc_id = str(row.get('Ticker', index))
         doc_ref = collection_ref.document(doc_id)
         batch.set(doc_ref, doc_data)
-        # Commit de batch elke 500 documenten
         if (index + 1) % 500 == 0:
             batch.commit()
-            batch = db_client.batch() # Start een nieuwe batch
+            batch = db_client.batch()
     
-    batch.commit() # Commit de laatste batch
+    batch.commit()
         
     print(f"   - ✅ {len(df)} documenten weggeschreven naar '{collection_name}'.")
 
-# --- Bestaande Functies (add_calculated_columns, etc.) blijven ongewijzigd ---
+# --- Bestaande Functies ---
 def add_calculated_columns(df):
     print("➡️ Calculating final columns and financial ratios...")
     df['Assets'] = df['Assets_LastQuarter'].combine_first(df['Assets_LastQuarter-1']).combine_first(df['Assets_LastQuarter-2'])
@@ -250,37 +243,40 @@ def run_guru_models(db_client, df):
     
     # --- 1. Magic Formula ---
     print("\n🔮 Running Model 1: Magic Formula...")
-    mf_df = df.copy()
-    mf_df.dropna(subset=['Market Cap'], inplace=True)
-    mf_df = mf_df[mf_df['Market Cap'] > 500_000_000]
-    mf_df.dropna(subset=['ROC', 'EarningsYield'], inplace=True)
-    mf_df['ROC_Rank'] = mf_df['ROC'].rank(ascending=False, method='first')
-    mf_df['EY_Rank'] = mf_df['EarningsYield'].rank(ascending=False, method='first')
-    mf_df['Magic_Rank'] = mf_df['ROC_Rank'] + mf_df['EY_Rank']
-    mf_df.sort_values('Magic_Rank', inplace=True)
-    mf_buys = mf_df.head(30)
-    mf_sells = mf_df.tail(30)
-    print(f"   - Found {len(mf_buys)} Buy and {len(mf_sells)} Sell picks.")
-    write_df_to_firestore(db_client, mf_buys, 'magic_formula_buys')
-    write_df_to_firestore(db_client, mf_sells, 'magic_formula_sells')
-    
+    mf_df = df[(df['Market Cap'] > 500_000_000) & df['ROC'].notna() & df['EarningsYield'].notna()].copy()
+    if not mf_df.empty:
+        mf_df['ROC_Rank'] = mf_df['ROC'].rank(ascending=False, method='first')
+        mf_df['EY_Rank'] = mf_df['EarningsYield'].rank(ascending=False, method='first')
+        mf_df['Magic_Rank'] = mf_df['ROC_Rank'] + mf_df['EY_Rank']
+        mf_df.sort_values('Magic_Rank', inplace=True)
+        mf_buys = mf_df.head(30)
+        mf_sells = mf_df.tail(30)
+        print(f"   - Found {len(mf_buys)} Buy and {len(mf_sells)} Sell picks.")
+        write_df_to_firestore(db_client, mf_buys, 'magic_formula_buys')
+        write_df_to_firestore(db_client, mf_sells, 'magic_formula_sells')
+        del mf_buys, mf_sells
+    else:
+        print("   - No companies met the criteria for the Magic Formula Model.")
+    del mf_df
+    gc.collect()
+
     # --- 2. The Intelligent Investor ---
     print("\n🧐 Running Model 2: The Intelligent Investor...")
-    ii_df = df.copy()
-    ii_df.dropna(subset=['Market Cap'], inplace=True)
-    ii_df = ii_df[ii_df['Market Cap'] > 500_000_000]
-    ii_df.dropna(subset=['BargainValue'], inplace=True)
-    ii_buys = ii_df[ii_df['BargainValue'] > 0]
+    ii_buys = df[(df['Market Cap'] > 500_000_000) & (df['BargainValue'] > 0)].copy()
     print(f"   - Found {len(ii_buys)} Buy picks.")
     write_df_to_firestore(db_client, ii_buys, 'intelligent_investor_buys')
+    del ii_buys
+    gc.collect()
 
     # --- 3. Combined Model ---
     print("\n✨ Running Model 3: Combined Magic Formula & Intelligent Investor...")
-    combo_df = df.copy()
-    combo_df.dropna(subset=['Market Cap'], inplace=True)
-    combo_df = combo_df[combo_df['Market Cap'] > 500_000_000]
-    combo_df = combo_df[combo_df['BargainValue'] > 0]
-    combo_df.dropna(subset=['ROC', 'EarningsYield'], inplace=True)
+    combo_df = df[
+        (df['Market Cap'] > 500_000_000) & 
+        (df['BargainValue'] > 0) & 
+        df['ROC'].notna() & 
+        df['EarningsYield'].notna()
+    ].copy()
+
     if not combo_df.empty:
         combo_df['ROC_Rank'] = combo_df['ROC'].rank(ascending=False, method='first')
         combo_df['EY_Rank'] = combo_df['EarningsYield'].rank(ascending=False, method='first')
@@ -289,8 +285,11 @@ def run_guru_models(db_client, df):
         combo_buys = combo_df.head(30)
         print(f"   - Found {len(combo_buys)} Buy picks.")
         write_df_to_firestore(db_client, combo_buys, 'combined_model_buys')
+        del combo_buys
     else:
-        print("   - No companies met the initial criteria for the Combined Model.")
+        print("   - No companies met the criteria for the Combined Model.")
+    del combo_df
+    gc.collect()
 
 @app.route('/')
 def main_job_entrypoint():
@@ -300,6 +299,9 @@ def main_job_entrypoint():
         final_df = fetch_sec_data()
         
         if final_df is not None:
+            print("\n➡️ DataFrame memory usage before running models:")
+            final_df.info(memory_usage='deep')
+
             print("\n➡️ Volledige dataset naar Firestore schrijven...")
             write_df_to_firestore(db, final_df, 'sec_financial_data_full_detail')
             run_guru_models(db, final_df)
